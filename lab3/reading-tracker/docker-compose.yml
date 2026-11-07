@@ -1,0 +1,105 @@
+# Reading Tracker — Лабораторна робота 2 (+ Лабораторна 3: Outbox, Inbox, SAGA, DLQ)
+# Запуск:        docker compose up --build -d
+# Масштабування: docker compose up -d --scale catalog-service=3 --scale library-service=2
+name: reading-tracker
+
+x-service: &service
+  restart: unless-stopped
+  networks: [appnet]
+  environment: &env
+    CONSUL_URL: http://consul:8500
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+    DB_HOST: postgres
+    DB_USER: postgres
+    DB_PASSWORD: postgres
+    JWT_SECRET: change-me-in-prod
+
+services:
+  # ---------- інфраструктура ----------
+  consul:                       # service discovery
+    image: hashicorp/consul:1.19
+    command: agent -dev -ui -client=0.0.0.0
+    ports: ["8500:8500"]
+    networks: [appnet]
+
+  rabbitmq:                     # message broker
+    image: rabbitmq:3-management
+    ports: ["5672:5672", "15672:15672"]
+    networks: [appnet]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:                     # окрема БД на кожен сервіс
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    networks: [appnet]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---------- мікросервіси ----------
+  api-gateway:                  # єдина точка входу (edge)
+    <<: *service
+    build: { context: ., dockerfile: services/gateway/Dockerfile }
+    ports: ["8080:8000"]
+    depends_on: [consul]
+
+  user-service:
+    <<: *service
+    build: { context: ., dockerfile: services/user/Dockerfile }
+    depends_on: { consul: { condition: service_started }, rabbitmq: { condition: service_healthy }, postgres: { condition: service_healthy } }
+
+  catalog-service:              # без container_name і без published-порту — щоб можна було --scale
+    <<: *service
+    build: { context: ., dockerfile: services/catalog/Dockerfile }
+    depends_on: { consul: { condition: service_started }, postgres: { condition: service_healthy } }
+
+  library-service:
+    <<: *service
+    build: { context: ., dockerfile: services/library/Dockerfile }
+    depends_on: { consul: { condition: service_started }, rabbitmq: { condition: service_healthy }, postgres: { condition: service_healthy } }
+
+  rating-service:
+    <<: *service
+    build: { context: ., dockerfile: services/rating/Dockerfile }
+    depends_on: { consul: { condition: service_started }, rabbitmq: { condition: service_healthy }, postgres: { condition: service_healthy } }
+
+  analytics-service:            # консюмер подій + API статистики
+    <<: *service
+    environment:
+      <<: *env
+      SAGA_FAIL_EVERY: ${SAGA_FAIL_EVERY:-0}     # Лаба 3: N>0 -> кожна N-та сага падає (демо DLQ/rollback)
+    build: { context: ., dockerfile: services/analytics/Dockerfile }
+    depends_on: { consul: { condition: service_started }, rabbitmq: { condition: service_healthy }, postgres: { condition: service_healthy } }
+
+  saga-service:                 # Лаба 3: оркестратор SAGA (saga_log, таймаути, DLQ)
+    <<: *service
+    build: { context: ., dockerfile: services/saga/Dockerfile }
+    environment:
+      <<: *env
+      SAGA_TIMEOUT: "30"
+    depends_on: { consul: { condition: service_started }, rabbitmq: { condition: service_healthy }, postgres: { condition: service_healthy } }
+
+  scheduler:                    # публікує scheduler.month-ended (у демо кожні 60 с)
+    <<: *service
+    build: { context: ., dockerfile: services/scheduler/Dockerfile }
+    environment:
+      <<: *env
+      SCHEDULER_INTERVAL: "60"
+    depends_on: { rabbitmq: { condition: service_healthy } }
+
+networks:
+  appnet:
+    driver: bridge
+
+volumes:
+  pgdata:

@@ -1,0 +1,6 @@
+CREATE DATABASE user_db;
+CREATE DATABASE catalog_db;
+CREATE DATABASE library_db;
+CREATE DATABASE rating_db;
+CREATE DATABASE analytics_db;
+CREATE DATABASE saga_db;
